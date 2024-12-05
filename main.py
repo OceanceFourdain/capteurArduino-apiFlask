@@ -1,25 +1,24 @@
 from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from flask_bcrypt import Bcrypt
-from flask_session import Session
-from datetime import datetime
+import datetime
 import mysql.connector
 from mysql.connector import Error
+import jwt
 app = Flask(__name__)
 cors = CORS(app, supports_credentials=True)
 bcrypt = Bcrypt(app)
 app.config['SECRET_KEY'] = 'bobDylan'
-app.config['SESSION_TYPE'] = 'filesystem'
-Session(app)
 
 
 def create_db_connection():
     try:
         connection = mysql.connector.connect(
-            host="localhost", 
-            user="root",
+            host="212.227.140.50", 
+            port="3306",
+            user="oceance",
             password="Four.Dain.80",
-            database="iotCapteurPlante"
+            database="iot_sensorPlante"
         )
         return connection
     except Error as e:
@@ -38,7 +37,7 @@ def set_data():
         pressure = data.get('pressure')
         humidity = data.get('humidity')
         light = data.get('light')
-        cursor.execute("INSERT INTO sensorcapteur (soilMoisturePercent, soilMoistureValue, temperature, pressure, humidity, isLight) VALUES (%s, %s, %s, %s, %s, %s)", (soilmoisturepercent, soilmoistureValue, temperature, pressure, humidity, light))
+        cursor.execute("INSERT INTO sensorCapteur (soilMoisturePercent, soilMoistureValue, temperature, pressure, humidity, isLight) VALUES (%s, %s, %s, %s, %s, %s)", (soilmoisturepercent, soilmoistureValue, temperature, pressure, humidity, light))
         connection.commit()
         cursor.close()
         connection.close()
@@ -49,18 +48,28 @@ def set_data():
 
 @app.route('/api/v1/user/signup', methods=['POST'])
 def signup():
-    data_sign = request.get_json()
-    lastname = data_sign.get('lastname')
-    firstname = data_sign.get('firstname')
-    email = data_sign.get('email')
-    passwordHash = bcrypt.generate_password_hash(data_sign.get('password')).decode('utf8')
-    password = passwordHash
-    isHouse = data_sign.get('isHouse')
-    isApartment = data_sign.get('isApartment')
-    cursor.execute("INSERT INTO usersensor (lastname, firstname, email, password, isHouse, isApartment) VALUES (%s, %s, %s, %s, %s, %s)", (lastname, firstname, email, password, isHouse, isApartment))
-    conn.commit()
-    print("Utilisateur créé : ", data_sign) 
-    return jsonify({"message": "Inscription réussie"}), 201
+    connection = create_db_connection()
+    if connection:
+        cursor = connection.cursor(dictionary=True)
+        data_sign = request.get_json()
+        lastname = data_sign.get('lastname')
+        firstname = data_sign.get('firstname')
+        email = data_sign.get('email')
+        passwordHash = bcrypt.generate_password_hash(data_sign.get('password')).decode('utf8')
+        password = passwordHash
+        isHouse = data_sign.get('isHouse')
+        isApartment = data_sign.get('isApartment')
+        cursor.execute("INSERT INTO userSensor (lastname, firstname, email, password, isHouse, isApartment) VALUES (%s, %s, %s, %s, %s, %s)", (lastname, firstname, email, password, isHouse, isApartment))
+        connection.commit()
+        cursor.close()
+        connection.close()
+        token = jwt.encode({
+            'user': lastname,
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+        }, app.config['SECRET_KEY'], algorithm="HS256")
+        return jsonify({'token': token}), 201
+    else:
+        return jsonify({"message": "Erreur d'inscription"}), 500
 
 @app.route('/api/v1/user/login', methods=['POST'])
 def login():
@@ -70,17 +79,19 @@ def login():
     connection = create_db_connection()
     if connection:
         cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT lastname, firstname, email, password FROM usersensor WHERE email=%s", (email,))
+        cursor.execute("SELECT lastname, firstname, email, password FROM userSensor WHERE email=%s", (email,))
         row = cursor.fetchone()
         cursor.close()
         connection.close()
         if row and bcrypt.check_password_hash(row['password'], password):
-            session['user'] = row['email']
-            return jsonify({"message": "Connexion réussie", 'lastname': row['lastname']}), 202
+            token = jwt.encode({
+                'user': row['lastname'] + row['firstname'],
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+            }, app.config['SECRET_KEY'], algorithm="HS256")
+
+            return jsonify({'token': token}), 202
         else:
-            return jsonify({"message": "Erreur de connexion"}), 401
-        
-       
+            return jsonify({"message": "Erreur de connexion"}), 401  
     else:
         return jsonify({"message": "Erreur de connexion"}), 500
 @app.route('/api/v1/user/logout', methods=['POST'])
@@ -96,7 +107,7 @@ def userInfo():
         connection = create_db_connection()
         if connection:
             cursor = connection.cursor(dictionary=True)
-            cursor.execute("SELECT * FROM usersensor WHERE email=%s", (user_email,))
+            cursor.execute("SELECT * FROM userSensor WHERE email=%s", (user_email,))
             row = cursor.fetchone()
             cursor.close()
             connection.close()
@@ -114,12 +125,31 @@ def userInfo():
         return jsonify({"message": "Erreur de connexion"}), 500
     return jsonify({"message": "Unauthorized"}), 401
 
+@app.route('/protected', methods=['GET'])
+def protected():
+    token = request.headers.get('Authorization')
+
+    if not token:
+        return jsonify({'message': 'Token manquant!'}), 403
+
+    try:
+        # Décoder le token
+        data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+        return jsonify({'message': f'Bienvenue {data["user"]}!'})
+    except jwt.ExpiredSignatureError:
+        return jsonify({'message': 'Token expiré!'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'message': 'Token invalide!'}), 401
+
+
+
+
 @app.route('/api/v1/getAllDataSensor', methods=['GET'])
 def get_data():
     connection = create_db_connection()
     if connection:
         cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM sensorcapteur")
+        cursor.execute("SELECT * FROM sensorCapteur")
         rows = cursor.fetchall()
         cursor.close()
         connection.close()
@@ -133,7 +163,8 @@ def get_data():
                 "pressure": row['pressure'],
                 "humidity": row['humidity'],
                 "isLight": row['isLight'],
-                "created_at": datetime.strftime(row['created_at'], "%d-%m-%Y")
+                "created_at": datetime.datetime.strftime(row['created_at'], "%d-%m-%Y"),
+                "time_at": datetime.datetime.strftime(row['created_at'], "%H h %M")
             })
         return jsonify(data), 200
     else:
@@ -144,7 +175,7 @@ def get_last_data():
     connection = create_db_connection()
     if connection:
         cursor = connection.cursor(dictionary=True)
-        cursor.execute("SELECT id, soilMoisturePercent, soilMoistureValue, temperature, pressure, humidity, isLight, created_at FROM sensorcapteur ORDER BY id DESC LIMIT 1")
+        cursor.execute("SELECT id, soilMoisturePercent, soilMoistureValue, temperature, pressure, humidity, isLight, created_at FROM sensorCapteur ORDER BY id DESC LIMIT 1")
         last_row = cursor.fetchone()
         cursor.close()
         connection.close()
@@ -158,7 +189,8 @@ def get_last_data():
                 "pressure": last_row['pressure'],
                 "humidity": last_row['humidity'],
                 "isLight": last_row['isLight'],
-                "created_at": datetime.strftime(last_row['created_at'], "%d-%m-%Y")
+                "created_at": datetime.datetime.strftime(last_row['created_at'], "%d-%m-%Y"),
+                "time_at": datetime.datetime.strftime(last_row['created_at'], "%H h %M")
             })
             return jsonify(data), 200
         else:
@@ -167,5 +199,5 @@ def get_last_data():
         return jsonify({"message": "Erreur de connexion"}), 500
 
 if __name__ == "__main__":
-    app.run(host='192.168.1.239', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
     ##app.run(debug=True)
